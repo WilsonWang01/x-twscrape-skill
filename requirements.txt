@@ -1,0 +1,2 @@
+twscrape==0.18.1
+certifi>=2026.5.20
