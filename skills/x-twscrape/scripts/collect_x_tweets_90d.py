@@ -21,6 +21,7 @@ import ssl
 import sys
 import time
 from collections import Counter, defaultdict
+from contextlib import aclosing
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -288,70 +289,39 @@ def cached_user_for_handle(store: "OutputStore", handle: str) -> Any | None:
 
 
 def patch_twscrape_xclid() -> None:
-    """Make twscrape's XClientTxId bootstrap tolerant of X frontend churn."""
+    """Use upstream signing and surface aborted requests instead of empty results."""
+    from importlib.metadata import version
+
     try:
-        import httpx
-        from twscrape import xclid
-    except ImportError:
+        from twscrape import queue_client
+    except ImportError as exc:
+        raise CollectorError("请先安装 requirements-scrape.txt（开源包使用 requirements.txt）。") from exc
+
+    installed = re.match(r"(\d+)\.(\d+)\.(\d+)", version("twscrape"))
+    if not installed or tuple(map(int, installed.groups())) < (0, 20, 1):
+        raise CollectorError("X 网页签名格式已更新，请升级到 twscrape>=0.20.1；旧签名补丁已停用。")
+    os.environ.setdefault("TWS_TELEMETRY", "0")
+
+    original_get = queue_client.QueueClient.get
+    if getattr(original_get, "_iw_checked", False):
         return
 
-    desktop_ua = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/137.0.0.0 Safari/537.36"
-    )
+    async def checked_get(client: Any, *args: Any, **kwargs: Any) -> Any:
+        response = await original_get(client, *args, **kwargs)
+        if response is None:
+            raise CollectorError(
+                f"X 请求中止（端点 {client.queue}）；可能是签名、登录或网络错误，不能视为没有新帖。"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or "data" not in payload:
+            raise CollectorError(f"X 响应缺少 data（端点 {client.queue}），请检查接口或登录状态。")
+        if payload.get("errors") and not any((payload.get("data") or {}).values()):
+            codes = [item.get("code") for item in payload["errors"] if isinstance(item, dict)]
+            raise CollectorError(f"X 返回错误（端点 {client.queue}，错误码 {codes}）。")
+        return response
 
-    def make_client() -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            headers={"user-agent": desktop_ua},
-            follow_redirects=True,
-            timeout=httpx.Timeout(60.0, connect=15.0),
-        )
-
-    def emit_once(seen: set[str], url: str) -> Iterable[str]:
-        if url not in seen:
-            seen.add(url)
-            yield url
-
-    def patched_get_scripts_list(text: str) -> Iterable[str]:
-        seen: set[str] = set()
-
-        for match in re.finditer(
-            r"https://abs\.twimg\.com/responsive-web/client-web/[^\"']+?\.js",
-            text,
-        ):
-            yield from emit_once(seen, match.group(0))
-
-        hash_map = {
-            match.group(1): match.group(2)
-            for match in re.finditer(r"([A-Za-z0-9_]+):\"([0-9a-f]{7})\"", text)
-        }
-        name_map: dict[str, str] = {}
-        for match in re.finditer(r"([A-Za-z0-9_]+):\"([^\"]+)\"", text):
-            value = match.group(2)
-            if not re.fullmatch(r"[0-9a-f]{7}", value):
-                name_map[match.group(1)] = value
-
-        for chunk_id, hash_value in hash_map.items():
-            name = name_map.get(chunk_id, chunk_id)
-            yield from emit_once(seen, xclid.script_url(name, hash_value + "a"))
-
-        if not seen:
-            raise Exception("Failed to parse scripts")
-
-    async def patched_create() -> Any:
-        clt = make_client()
-        try:
-            text = await xclid.get_tw_page_text("https://x.com/", clt)
-            soup = xclid.bs4.BeautifulSoup(text, "html.parser")
-            vk_bytes, anim_key = await xclid.load_keys(soup, clt)
-            return xclid.XClIdGen(vk_bytes, anim_key)
-        finally:
-            await clt.aclose()
-
-    xclid._make_client = make_client
-    xclid.get_scripts_list = patched_get_scripts_list
-    xclid.XClIdGen.create = staticmethod(patched_create)
+    checked_get._iw_checked = True
+    queue_client.QueueClient.get = checked_get
 
 
 def build_window(args: argparse.Namespace) -> tuple[date, date, datetime, datetime]:
@@ -709,64 +679,65 @@ async def collect_twscrape_mode(
     newest_seen: str | None = None
     stop_reason = "stream_end"
 
-    async for tweet in tweet_stream:
-        scanned += 1
-        raw = tweet.dict()
-        created = tweet_created_at(raw)
-        if created:
-            created_iso = created.isoformat()
-            oldest_seen = min(oldest_seen, created_iso) if oldest_seen else created_iso
-            newest_seen = max(newest_seen, created_iso) if newest_seen else created_iso
+    async with aclosing(tweet_stream):
+        async for tweet in tweet_stream:
+            scanned += 1
+            raw = tweet.dict()
+            created = tweet_created_at(raw)
+            if created:
+                created_iso = created.isoformat()
+                oldest_seen = min(oldest_seen, created_iso) if oldest_seen else created_iso
+                newest_seen = max(newest_seen, created_iso) if newest_seen else created_iso
 
-        if args.max_scan_per_mode > 0 and scanned > args.max_scan_per_mode:
-            stop_reason = "max_scan_per_mode"
-            break
-
-        if created and created >= until_dt:
-            out_of_window_new += 1
-            continue
-
-        if created and created < since_dt:
-            out_of_window_old += 1
-            if (
-                not args.disable_old_stop
-                and scanned >= args.min_scanned_before_old_stop
-                and out_of_window_old >= args.old_tweet_stop_count
-            ):
-                stop_reason = "old_window_stop"
+            if args.max_scan_per_mode > 0 and scanned > args.max_scan_per_mode:
+                stop_reason = "max_scan_per_mode"
                 break
-            continue
 
-        if not in_window(created, since_dt, until_dt):
-            continue
+            if created and created >= until_dt:
+                out_of_window_new += 1
+                continue
 
-        added = store.record_tweet(
-            collector="twscrape",
-            source=source,
-            handle=handle,
-            mode=mode,
-            query=query if mode == "search" else None,
-            tweet=raw,
-        )
-        if added:
-            new_count += 1
-        else:
-            duplicate_count += 1
+            if created and created < since_dt:
+                out_of_window_old += 1
+                if (
+                    not args.disable_old_stop
+                    and scanned >= args.min_scanned_before_old_stop
+                    and out_of_window_old >= args.old_tweet_stop_count
+                ):
+                    stop_reason = "old_window_stop"
+                    break
+                continue
 
-        if args.limit_per_user_mode > 0 and new_count >= args.limit_per_user_mode:
-            stop_reason = "limit_per_user_mode"
-            break
+            if not in_window(created, since_dt, until_dt):
+                continue
 
-        if (
-            args.sleep_every_tweets > 0
-            and scanned % args.sleep_every_tweets == 0
-            and args.sleep_between_batches_max > 0
-        ):
-            await maybe_sleep(
-                args.sleep_between_batches_min,
-                args.sleep_between_batches_max,
-                f"@{handle}/{mode}: scanned {scanned}, new {new_count}",
+            added = store.record_tweet(
+                collector="twscrape",
+                source=source,
+                handle=handle,
+                mode=mode,
+                query=query if mode == "search" else None,
+                tweet=raw,
             )
+            if added:
+                new_count += 1
+            else:
+                duplicate_count += 1
+
+            if args.limit_per_user_mode > 0 and new_count >= args.limit_per_user_mode:
+                stop_reason = "limit_per_user_mode"
+                break
+
+            if (
+                args.sleep_every_tweets > 0
+                and scanned % args.sleep_every_tweets == 0
+                and args.sleep_between_batches_max > 0
+            ):
+                await maybe_sleep(
+                    args.sleep_between_batches_min,
+                    args.sleep_between_batches_max,
+                    f"@{handle}/{mode}: scanned {scanned}, new {new_count}",
+                )
 
     result = {
         "collector": "twscrape",
@@ -810,15 +781,15 @@ async def collect_with_twscrape(
     since_dt: datetime,
     until_dt: datetime,
 ) -> dict[str, Any]:
-    patch_twscrape_xclid()
     try:
+        patch_twscrape_xclid()
         from twscrape import API
-    except ImportError as exc:
-        raise CollectorError(
-            "twscrape is not installed. Run: python3 -m pip install -r requirements.txt"
-        ) from exc
+    except (ImportError, CollectorError) as exc:
+        error = {"collector": "twscrape", "phase": "runtime", "error_type": type(exc).__name__, "error": str(exc)}
+        store.record_error(error)
+        return {"collector": "twscrape", "status": "blocked", "tweets": 0, "errors": [error]}
 
-    api = API(str(args.twscrape_db))
+    api = API(str(args.twscrape_db), wait_timeout=60)
     stats = await api.pool.stats()
     if stats.get("active", 0) < 1:
         error = {
@@ -882,6 +853,7 @@ async def collect_with_twscrape(
                 )
                 results.append(result)
             except Exception as exc:  # noqa: BLE001 - keep collecting.
+                store.write_checkpoint(handle, "twscrape", mode, {"completed": False, "status": "failed"})
                 error = {
                     "collector": "twscrape",
                     "handle": handle,

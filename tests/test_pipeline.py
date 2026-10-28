@@ -112,7 +112,7 @@ class PipelineTest(unittest.TestCase):
                 return {"active": 1}
         class FakeAPI:
             pool = FakePool()
-            def __init__(self, db):
+            def __init__(self, db, **kwargs):
                 pass
             async def user_by_login(self, handle):
                 if handle == "broken":
@@ -164,6 +164,35 @@ class PipelineTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as error:
                     collector.parse_args()
                 self.assertEqual(error.exception.code, 2)
+
+    def test_aborted_x_request_is_not_treated_as_empty_timeline(self):
+        class FakeQueue:
+            queue = "UserTweets"
+            payload = None
+            async def get(self, *args, **kwargs):
+                return None if self.payload is None else types.SimpleNamespace(json=lambda: self.payload)
+        package = types.ModuleType("twscrape")
+        package.queue_client = types.SimpleNamespace(QueueClient=FakeQueue)
+        with patch.dict(sys.modules, {"twscrape": package}), \
+             patch("importlib.metadata.version", return_value="0.20.1"):
+            collector.patch_twscrape_xclid()
+            with self.assertRaisesRegex(collector.CollectorError, "不能视为没有新帖"):
+                asyncio.run(FakeQueue().get("https://example.invalid"))
+            client = FakeQueue()
+            for payload in ({"errors": [{"code": 32}]}, {"data": None, "errors": [{"code": 32}]}):
+                client.payload = payload
+                with self.assertRaises(collector.CollectorError):
+                    asyncio.run(client.get("https://example.invalid"))
+            client.payload = {"data": {"user": {"result": {}}}}
+            self.assertIsNotNone(asyncio.run(client.get("https://example.invalid")))
+
+    def test_old_signing_runtime_is_rejected(self):
+        package = types.ModuleType("twscrape")
+        package.queue_client = types.SimpleNamespace()
+        with patch.dict(sys.modules, {"twscrape": package}), \
+             patch("importlib.metadata.version", return_value="0.18.1"):
+            with self.assertRaisesRegex(collector.CollectorError, "升级"):
+                collector.patch_twscrape_xclid()
 
 
 if __name__ == "__main__":
