@@ -16,7 +16,7 @@
 
 ## 快速使用
 
-适用 macOS / Linux，Python 3.10+。建议先在独立目录安装，不要复用生产账号库同时运行两套任务。
+适用 macOS / Linux，建议 Python 3.12 或 3.13；完整的新依赖清单最低要求 Python 3.11.5（由 SoupSieve 3.0.4 决定）。建议先在独立目录安装，不要复用生产账号库同时运行两套任务。
 
 ```bash
 git clone https://github.com/WilsonWang01/x-twscrape-skill.git
@@ -28,6 +28,10 @@ python3 -m venv .venv
 依赖锁定到修复后验证的 `twscrape==0.20.1`。2026-10-28 实测发现旧版 0.18.1 的网页签名解析已经失效，并可能把失败误报为“0 条新增”。本版停用旧签名补丁，使用上游的新格式支持，同时将请求中止、错误响应和未完成扫描明确报错。若遇到后续接口变化，仍应先在独立账号库和输出目录验证升级。上游说明：[vladkens/twscrape](https://github.com/vladkens/twscrape)。
 
 本次实际测试读取了 Jukan 的账号资料、5 条帖子正文、3 条搜索结果，并成功下载 1 张原图。这是有限样本，不代表所有账号、历史窗口或 PDF 外站均已验证。库的使用统计上报默认关闭（`TWS_TELEMETRY=0`）。
+
+抓取运行所需的 15 项依赖已统一核对并固定在 `skills/x-twscrape/requirements.txt`。除核心库外，本次更新了 BeautifulSoup、SoupSieve、AnyIO、idna、PyOTP、typing-extensions；HTTPX 等已是当前版本的包保留原版本。没有接入新的抓取引擎或修改下游 AI 分析器。
+
+完整依赖升级后，云端 Python 3.12 环境的单账号 20 分钟窗口验证抓到 2 条新帖，错误数为 0。本机 Python 3.13 环境的 10 项离线测试通过。该结果仍不代表全部账号或历史数据完整。
 
 ### 1. 在本机导入登录态
 
@@ -112,7 +116,7 @@ mkdir -p ~/.codex/skills
 
 > 使用 $x-twscrape，抓取指定账号最近 20 分钟的推文和图片。先检查本地账号状态，保持单进程，完成后报告新增、失败与遗漏风险。
 
-使用安装后的脚本仍需在项目虚拟环境安装本仓库 `requirements.txt` 的依赖。若目标环境的 Skill 目录不同，以该环境配置为准。
+使用安装后的脚本仍需在项目虚拟环境执行 `python -m pip install -r ~/.codex/skills/x-twscrape/requirements.txt` 安装固定依赖。若目标环境的 Skill 目录不同，以该环境配置为准。
 
 ## 验证
 
