@@ -1,0 +1,12 @@
+interface:
+  display_name: "Investor Watcher 情报查询"
+  short_description: "查询关注账号的 X 帖子、投资观点、看多看空喊单与图片及 PDF 附件"
+  default_prompt: "使用 $investor-watcher-mcp 查询关注账号最近的投资情报和喊单，附上原文链接并说明数据时间。"
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "investor-watcher"
+      description: "Investor Watcher 只读 X 情报服务，需要独立 Bearer 凭证"
+      transport: "streamable_http"
+      url: "https://investorwatcher.watch/mcp"

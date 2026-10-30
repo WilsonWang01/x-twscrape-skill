@@ -4,6 +4,15 @@
 
 本仓库以 MIT 协议开源。无需官方 X API Key，默认没有官方 API 计费调用；机器、网络和下游 AI 分析仍可能产生费用。只使用自己有权访问的内容。
 
+## 两个独立的 Skill
+
+| Skill | 用途 | 需要什么 |
+| --- | --- | --- |
+| [`x-twscrape`](skills/x-twscrape/SKILL.md) | 在自己的环境抓取 X 帖子、图片和直接 PDF | 自己有权使用的 X 登录态、Python 抓取环境 |
+| [`investor-watcher-mcp`](skills/investor-watcher-mcp/SKILL.md) | 查询 Investor Watcher 已保存的帖子、投资观点、喊单和附件 | 支持 Streamable HTTP 的 MCP 客户端、服务所有者授权的 MCP 凭证 |
+
+两个 Skill 可分别安装。只查询云端数据不需要安装本仓库的 Python 抓取依赖，也不需要 X Cookie。**Skill 开源不代表云端数据匿名开放或免费授权**；本仓库和下载包均不提供访问凭证，不包含生产数据或 MCP 服务端部署代码。
+
 ## 能力与边界
 
 - 指定任意 X handle，支持 timeline（账号帖子列表）、replies（帖子及回复）、media（媒体列表）、search（账号范围检索）。
@@ -103,7 +112,7 @@ chmod 600 /private/path/x-cookies.txt
 
 只查询本地数据，输出帖子和错误行数、最近一次任务结果、账号 active/locks/stats（启用状态、冷却截止时间、请求统计），不会输出 Cookie、密码或完整账号记录。此命令不能单独证明后台进程仍存活或 X 登录态仍有效。
 
-## 安装 Skill
+## 安装抓取 Skill
 
 仓库里的 `skills/x-twscrape/` 是完整 Skill，包含所需脚本和方案说明。复制到本机 Codex 的 skills 目录即可；以下命令会在同名目录存在时停止，不会覆盖：
 
@@ -117,6 +126,32 @@ mkdir -p ~/.codex/skills
 > 使用 $x-twscrape，抓取指定账号最近 20 分钟的推文和图片。先检查本地账号状态，保持单进程，完成后报告新增、失败与遗漏风险。
 
 使用安装后的脚本仍需在项目虚拟环境执行 `python -m pip install -r ~/.codex/skills/x-twscrape/requirements.txt` 安装固定依赖。若目标环境的 Skill 目录不同，以该环境配置为准。
+
+## 接入云端 MCP Skill
+
+完整 Skill 在 `skills/investor-watcher-mcp/`，包含 Agent 工作指引、工具依赖声明和[接入说明](skills/investor-watcher-mcp/references/connection.md)。也可从 [Releases](https://github.com/WilsonWang01/x-twscrape-skill/releases/tag/mcp-skill-v1.0.0) 下载独立 ZIP 和 SHA-256 校验文件；ZIP 仅包含该 Skill 与 MIT 许可证。
+
+克隆仓库后可将 Skill 安装到 Codex 用户技能目录；同名目标已存在时以下命令会停止，不覆盖：
+
+```bash
+python3 -c 'import shutil; from pathlib import Path; shutil.copytree("skills/investor-watcher-mcp", Path.home()/".agents/skills/investor-watcher-mcp")'
+```
+
+安装 Skill 不会自动连接 MCP。按接入说明配置客户端，并通过安全方式注入独立访问凭证。Codex 配置示例不包含真实值：
+
+```toml
+[mcp_servers.investor-watcher]
+url = "https://investorwatcher.watch/mcp"
+bearer_token_env_var = "INVESTOR_WATCHER_MCP_TOKEN"
+```
+
+实际运行客户端的进程需要获得 `INVESTOR_WATCHER_MCP_TOKEN`，值不含 `Bearer ` 前缀。不要把真实值提交到 Git、Issue 或下载包；本服务没有 OAuth 登录流程。其他 Agent 的配置字段和技能目录可能不同，以其官方文档为准。
+
+连接并发现工具后，例如：
+
+> 使用 $investor-watcher-mcp 汇总北京时间今天关注账号的看多喊单，附原文链接和数据最新时间。
+
+此 Skill 只能查询已保存数据，不会触发抓取、补跑历史、修改订阅或发送 Telegram。一般看多观点与喊多信号分别使用 `direction` 与 `call_signal`；日期、分页、附件凭证保护和错误处理细节见 Skill，不能将数据库查询结果当作已核实的交易建议。
 
 ## 验证
 
@@ -135,5 +170,8 @@ python3 -m unittest discover -s tests -v
 | `skills/x-twscrape/scripts/collect_x_tweets_90d.py` | 从原项目提取的采集器，支持任意显式账号列表 |
 | `skills/x-twscrape/scripts/download_x_attachments.py` | 从原项目提取的图片和直接 PDF 下载器 |
 | `skills/x-twscrape/scripts/x_watch.py` | 凭据导入、进程锁、轮询和状态查询 |
+| `skills/investor-watcher-mcp/SKILL.md` | 只读 MCP 的 Agent 查询流程、工具参数与安全边界 |
+| `skills/investor-watcher-mcp/references/connection.md` | Codex 和其他 MCP 客户端接入说明 |
+| `skills/investor-watcher-mcp/agents/openai.yaml` | Skill 展示信息及远程 MCP 工具依赖声明 |
 
 本包不包含 Investor Watcher 的网页、生产数据库、服务器配置、Codex 分析服务或 Telegram 凭据。抓取结果可由其他项目自行读取 JSONL（每行一个 JSON 对象）接入。
